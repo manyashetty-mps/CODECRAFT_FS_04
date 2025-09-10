@@ -1,0 +1,132 @@
+// server.js
+const express = require("express");
+const http = require("http");
+const WebSocket = require("ws");
+const bodyParser = require("body-parser");
+
+const app = express();
+app.use(bodyParser.json());
+app.use(express.static("public"));
+
+const users = {};   // username -> password
+const tokens = {};  // token -> username
+const rooms = {};   // room -> Set of clients
+
+// Signup
+app.post("/signup", (req, res) => {
+  const { username, password } = req.body;
+  if (users[username]) return res.status(400).json({ error: "exists" });
+  users[username] = password;
+  res.json({ ok: true });
+});
+
+// Login
+app.post("/login", (req, res) => {
+  const { username, password } = req.body;
+  if (users[username] !== password) return res.status(400).json({ error: "bad login" });
+  const token = Math.random().toString(36).slice(2);
+  tokens[token] = username;
+  res.json({ token });
+});
+
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
+
+// WebSocket connections
+wss.on("connection", (ws, req) => {
+  const token = new URL(req.url, "http://localhost").searchParams.get("token");
+  const username = tokens[token];
+  if (!username) return ws.close();
+  ws.username = username;
+
+  ws.on("message", (msg) => {
+    const data = JSON.parse(msg);
+    if (data.type === "join") {
+      const room = data.room;
+      rooms[room] = rooms[room] || new Set();
+      rooms[room].add(ws);
+    } else if (data.type === "message") {
+      for (let client of rooms[data.room] || []) {
+        client.send(JSON.stringify({ from: username, room: data.room, text: data.text }));
+      }
+    }
+  });
+
+  ws.on("close", () => {
+    for (let r in rooms) rooms[r].delete(ws);
+  });
+});
+server.listen(3000, () => console.log("http://localhost:3000"));
+
+
+Frontend 
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Simple Chat</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin:20px; }
+    #chat { border:1px solid #ccc; height:200px; overflow:auto; padding:5px; margin-top:10px; }
+    input, button { margin:5px; padding:5px; }
+  </style>
+</head>
+<body>
+  <h2>Simple Chat App</h2>
+
+  <div>
+    <input id="user" placeholder="username">
+    <input id="pass" type="password" placeholder="password">
+    <button onclick="signup()">Sign Up</button>
+    <button onclick="login()">Login</button>
+  </div>
+
+  <div>
+    <input id="room" placeholder="room name">
+    <button onclick="joinRoom()">Join Room</button>
+  </div>
+
+  <div>
+    <input id="msg" placeholder="type message">
+    <button onclick="sendMsg()">Send</button>
+  </div>
+
+  <div id="chat"></div>
+
+  <script>
+    let token, ws;
+
+    function log(m){ 
+      chat.innerHTML += m+"<br>"; 
+      chat.scrollTop = chat.scrollHeight; 
+    }
+
+    async function signup(){
+      await fetch("/signup",{method:"POST",headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({username:user.value,password:pass.value})});
+      log("Signed up.");
+    }
+
+    async function login(){
+      let r=await fetch("/login",{method:"POST",headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({username:user.value,password:pass.value})});
+      let j=await r.json();
+      token=j.token;
+      ws=new WebSocket("ws://localhost:3000/?token="+token);
+      ws.onmessage=e=>{let d=JSON.parse(e.data); log(d.from+"["+d.room+"]: "+d.text);};
+      log("Logged in.");
+    }
+
+    function joinRoom(){
+      ws.send(JSON.stringify({type:"join",room:room.value}));
+      log("Joined "+room.value);
+    }
+
+    function sendMsg(){
+      ws.send(JSON.stringify({type:"message",room:room.value,text:msg.value}));
+      msg.value="";
+    }
+  </script>
+</body>
+</html>
+
